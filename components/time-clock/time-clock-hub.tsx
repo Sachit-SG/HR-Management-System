@@ -13,9 +13,9 @@ import {
 import {
   Archive,
   ArchiveRestore,
+  ChevronDown,
   Clock,
   Copy,
-  Filter,
   Pencil,
   Search,
   Store,
@@ -112,11 +112,20 @@ export function TimeClockHub({
   );
 
   const [query, setQuery] = useState("");
+  const [sideFilter, setSideFilter] = useState<"all" | "east" | "west" | "other">("all");
   const list = tab === "active" ? activeClocks : archivedClocks;
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return list;
-    return list.filter((c) => {
+    let result = list;
+    if (scopeAll && sideFilter !== "all") {
+      result = result.filter((c) => {
+        if (sideFilter === "east") return c.storeSide === "east";
+        if (sideFilter === "west") return c.storeSide === "west";
+        return c.storeSide !== "east" && c.storeSide !== "west";
+      });
+    }
+    if (!q) return result;
+    return result.filter((c) => {
       const assign = assignedLabel(c, employeeCount).toLowerCase();
       const store = storeLabelForCard(c, locationName, scopeAll)?.toLowerCase() ?? "";
       return (
@@ -126,7 +135,7 @@ export function TimeClockHub({
         (c.storeName?.toLowerCase().includes(q) ?? false)
       );
     });
-  }, [list, query, employeeCount, locationName, scopeAll]);
+  }, [list, query, employeeCount, locationName, scopeAll, sideFilter]);
 
   const [showAdd, setShowAdd] = useState(false);
   const [addLocationId, setAddLocationId] = useState(() => locationsForAdd[0]?.id ?? "");
@@ -478,15 +487,25 @@ export function TimeClockHub({
             aria-label="Search time clocks"
           />
         </div>
-        <button
-          type="button"
-          className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
-          disabled
-          title="Filters — connect to your data model when ready."
-        >
-          <Filter className="h-4 w-4 text-slate-400" aria-hidden />
-          Filter
-        </button>
+        {scopeAll ? (
+          <div className="relative min-w-[10rem]">
+            <select
+              value={sideFilter}
+              onChange={(e) => setSideFilter(e.target.value as typeof sideFilter)}
+              className="h-full w-full cursor-pointer appearance-none rounded-lg border border-slate-200 bg-white py-2 pl-3 pr-9 text-sm font-medium text-slate-700 hover:bg-slate-50"
+              aria-label="Filter by store region"
+            >
+              <option value="all">All regions</option>
+              <option value="east">East stores</option>
+              <option value="west">West stores</option>
+              <option value="other">Other</option>
+            </select>
+            <ChevronDown
+              className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500"
+              aria-hidden
+            />
+          </div>
+        ) : null}
       </div>
 
       {filtered.length === 0 ? (
@@ -558,7 +577,7 @@ export function TimeClockHub({
           }}
         >
           <div
-            className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl"
+            className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-e3"
             onClick={(e) => e.stopPropagation()}
           >
             <h2 id="add-clock-title" className="text-lg font-semibold text-slate-900">
@@ -641,7 +660,7 @@ export function TimeClockHub({
           }}
         >
           <div
-            className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl"
+            className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-e3"
             onClick={(e) => e.stopPropagation()}
           >
             <h2 id="edit-clock-title" className="text-lg font-semibold text-slate-900">

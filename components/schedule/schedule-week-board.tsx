@@ -197,6 +197,9 @@ export function ScheduleWeekBoard({
   const [lastPickedDay, setLastPickedDay] = useState<Date | null>(null);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
+  const [sectionFilter, setSectionFilter] = useState("");
+  const [sectionFilterOpen, setSectionFilterOpen] = useState(false);
+  const sectionFilterRef = useRef<HTMLDivElement | null>(null);
   const [viewMode, setViewMode] = useState<"job" | "users" | "list">(() => {
     if (typeof window === "undefined") return "users";
     const mode = new URLSearchParams(window.location.search).get("mode");
@@ -267,15 +270,47 @@ export function ScheduleWeekBoard({
   }, [calendarOpen]);
 
   useEffect(() => {
+    function onDocClick(e: MouseEvent) {
+      if (!sectionFilterRef.current?.contains(e.target as Node)) setSectionFilterOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setSectionFilterOpen(false);
+    }
+    if (sectionFilterOpen) {
+      document.addEventListener("click", onDocClick);
+      document.addEventListener("keydown", onKey);
+      return () => {
+        document.removeEventListener("click", onDocClick);
+        document.removeEventListener("keydown", onKey);
+      };
+    }
+  }, [sectionFilterOpen]);
+
+  useEffect(() => {
     const t = setTimeout(() => setSearch(searchInput), 200);
     return () => clearTimeout(t);
   }, [searchInput]);
+
+  const sectionFilterOptions = useMemo(
+    () => uniqueGroupSections(shiftsProp).map((s) => s.name),
+    [shiftsProp],
+  );
+
+  useEffect(() => {
+    if (sectionFilter && !sectionFilterOptions.includes(sectionFilter)) {
+      setSectionFilter("");
+    }
+  }, [sectionFilter, sectionFilterOptions]);
 
   const afterMutation = () => {
     router.replace(`/schedule/board?week=${encodeURIComponent(weekParam)}`);
     router.refresh();
   };
-  const shifts = useMemo(() => filterShiftsQuery(shiftsProp, search), [shiftsProp, search]);
+  const shifts = useMemo(() => {
+    let list = filterShiftsQuery(shiftsProp, search);
+    if (sectionFilter) list = list.filter((s) => s.groupName === sectionFilter);
+    return list;
+  }, [shiftsProp, search, sectionFilter]);
 
   const setModeInUrl = (mode: "users" | "job" | "list") => {
     const params = new URLSearchParams(window.location.search);
@@ -614,13 +649,65 @@ export function ScheduleWeekBoard({
                 </div>
               ) : null}
             </div>
+            <div className="relative" ref={sectionFilterRef}>
             <button
               type="button"
-              className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500"
-              aria-label="Filter"
+              className={`rounded-md border bg-white p-1.5 ${
+                sectionFilter
+                  ? "border-blue-300 text-blue-700"
+                  : "border-slate-200 text-slate-500 hover:bg-slate-50"
+              }`}
+              aria-label="Filter by schedule section"
+              aria-expanded={sectionFilterOpen}
+              aria-haspopup="menu"
+              title={sectionFilter ? `Section: ${sectionFilter}` : "Filter by section"}
+              onClick={() => setSectionFilterOpen((v) => !v)}
             >
               <Filter className="h-4 w-4" />
             </button>
+            {sectionFilterOpen ? (
+              <div
+                role="menu"
+                className="absolute left-0 top-[calc(100%+6px)] z-30 min-w-[12rem] rounded-xl border border-slate-200 bg-white p-2 shadow-lg"
+              >
+                <button
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={!sectionFilter}
+                  className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm ${
+                    !sectionFilter ? "bg-slate-100 text-slate-900" : "hover:bg-slate-50"
+                  }`}
+                  onClick={() => {
+                    setSectionFilter("");
+                    setSectionFilterOpen(false);
+                  }}
+                >
+                  All sections
+                  {!sectionFilter ? <span className="text-xs text-slate-500">✓</span> : null}
+                </button>
+                {sectionFilterOptions.map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={sectionFilter === name}
+                    className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm ${
+                      sectionFilter === name ? "bg-slate-100 text-slate-900" : "hover:bg-slate-50"
+                    }`}
+                    onClick={() => {
+                      setSectionFilter(name);
+                      setSectionFilterOpen(false);
+                    }}
+                  >
+                    {name}
+                    {sectionFilter === name ? (
+                      <span className="text-xs text-slate-500">✓</span>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            </div>
             <div className="relative" ref={rangeMenuRef}>
               <button
                 type="button"
@@ -888,11 +975,12 @@ export function ScheduleWeekBoard({
             >
               Daily info
               </button>
-            {searchInput.trim().length > 0 ? (
+            {searchInput.trim().length > 0 || sectionFilter ? (
               <button
                 type="button"
                 onClick={() => {
                   setSearchInput("");
+                  setSectionFilter("");
                 }}
                 className="inline-flex h-8 items-center rounded-full border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
               >

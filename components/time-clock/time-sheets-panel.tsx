@@ -4,14 +4,16 @@ import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   ChevronDown,
+  ChevronRight,
   Download,
   Filter,
   Lock,
   LockOpen,
-  Plus,
   Search,
 } from "lucide-react";
-import { useMemo, useRef, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { fetchTimesheetPeriod } from "@/app/actions/fetch-timesheet-period";
+import { fetchTimecardModalPool } from "@/app/actions/fetch-timecard-modal-pool";
 import { approveTimeEntry, unapproveTimeEntry } from "@/app/actions/time-entry-approval";
 import { lockPayPeriod, unlockPayPeriod } from "@/app/actions/pay-period-lock";
 import { seedSampleTimesheetPunches } from "@/app/actions/seed-time-entries";
@@ -50,8 +52,8 @@ import type { EnrichedPunchRow } from "@/lib/time-clock/types";
 type Props = {
   /** Rows for the active period (grid). */
   rows: EnrichedPunchRow[];
-  /** Wider pool for employee timecard modal (e.g. last 90 days). */
-  modalPoolRows: EnrichedPunchRow[];
+  /** Wider pool for employee timecard modal (loaded on first open, not initial page paint). */
+  modalPoolRows?: EnrichedPunchRow[];
   timeOffRecords?: TimeOffRecordForUi[];
   locationId: string;
   timeClockId: string;
@@ -117,37 +119,108 @@ function periodKindLabel(k: TimesheetPeriodKind): string {
   }
 }
 
+type EmployeeTimesheetRow = {
+  employeeId: string;
+  name: string;
+  role: string;
+  rows: EnrichedPunchRow[];
+};
+
+type ActivePeriodState = {
+  rows: EnrichedPunchRow[];
+  holidays: NonNullable<Props["holidays"]>;
+  payPeriodLock: Props["payPeriodLock"];
+  periodKind: TimesheetPeriodKind;
+  periodStartIso: string;
+  periodEndExclusiveIso: string;
+  rangeFromYmd: string | null;
+  rangeToYmd: string | null;
+};
+
 export function TimeSheetsPanel({
-  rows,
-  modalPoolRows,
+  rows: initialRows,
+  modalPoolRows: initialModalPoolRows = [],
   timeOffRecords = [],
   locationId,
   timeClockId,
   canArchive,
-  periodKind,
+  periodKind: initialPeriodKind,
   periodConfig,
-  periodStartIso,
-  periodEndExclusiveIso,
-  rangeFromYmd = null,
-  rangeToYmd = null,
+  periodStartIso: initialPeriodStartIso,
+  periodEndExclusiveIso: initialPeriodEndExclusiveIso,
+  rangeFromYmd: initialRangeFromYmd = null,
+  rangeToYmd: initialRangeToYmd = null,
   clockDefaultKind,
   storeEmployees,
-  holidays = [],
+  holidays: initialHolidays = [],
   hourlyRatesByEmployee = {},
   canLockPayPeriods = false,
-  payPeriodLock = null,
+  payPeriodLock: initialPayPeriodLock = null,
   payrollPolicy = DEFAULT_PAYROLL_POLICY,
 }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [actionPending, startTransition] = useTransition();
+  const [periodNavPending, startPeriodNav] = useTransition();
+  const periodFetchGen = useRef(0);
+  const [periodNavErr, setPeriodNavErr] = useState<string | null>(null);
+  const [activePeriod, setActivePeriod] = useState<ActivePeriodState>(() => ({
+    rows: initialRows,
+    holidays: initialHolidays,
+    payPeriodLock: initialPayPeriodLock,
+    periodKind: initialPeriodKind,
+    periodStartIso: initialPeriodStartIso,
+    periodEndExclusiveIso: initialPeriodEndExclusiveIso,
+    rangeFromYmd: initialRangeFromYmd,
+    rangeToYmd: initialRangeToYmd,
+  }));
+
+  const {
+    rows,
+    holidays,
+    payPeriodLock,
+    periodKind,
+    periodStartIso,
+    periodEndExclusiveIso,
+    rangeFromYmd,
+    rangeToYmd,
+  } = activePeriod;
+
+  const serverPeriodKey = `${initialPeriodStartIso}|${initialPeriodEndExclusiveIso}|${initialPeriodKind}|${initialRangeFromYmd ?? ""}|${initialRangeToYmd ?? ""}`;
+
+  useEffect(() => {
+    setActivePeriod({
+      rows: initialRows,
+      holidays: initialHolidays,
+      payPeriodLock: initialPayPeriodLock,
+      periodKind: initialPeriodKind,
+      periodStartIso: initialPeriodStartIso,
+      periodEndExclusiveIso: initialPeriodEndExclusiveIso,
+      rangeFromYmd: initialRangeFromYmd,
+      rangeToYmd: initialRangeToYmd,
+    });
+    setPeriodNavErr(null);
+  }, [serverPeriodKey, initialRows, initialHolidays, initialPayPeriodLock]);
+
   const [err, setErr] = useState<string | null>(null);
   const [seedPending, setSeedPending] = useState(false);
   const [query, setQuery] = useState("");
-  /** Collapsed by default — expanded panel is manager-focused (disabled placeholders). */
+  /** Collapsed by default — expanded panel holds position / roster filters. */
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [filterRole, setFilterRole] = useState("");
+  const [filterRoster, setFilterRoster] = useState<"all" | "with_hours" | "no_hours">("all");
   const [timecardAnchorRow, setTimecardAnchorRow] = useState<EnrichedPunchRow | null>(null);
+  const [timecardEmployeeId, setTimecardEmployeeId] = useState<string | null>(null);
+  const [modalPoolRows, setModalPoolRows] = useState<EnrichedPunchRow[]>(initialModalPoolRows);
+  const modalPoolLoadedRef = useRef(false);
+  const modalPoolFetchGen = useRef(0);
+  const [modalPoolLoading, setModalPoolLoading] = useState(false);
+  const [modalPoolErr, setModalPoolErr] = useState<string | null>(null);
+  /** When an employee closes the auto-opened timecard, don't reopen until the pay period changes. */
+  const [dismissedTimecardPeriodKey, setDismissedTimecardPeriodKey] = useState<string | null>(
+    null,
+  );
   const [approvalErr, setApprovalErr] = useState<string | null>(null);
   const [lockPending, startLockTransition] = useTransition();
   const [lockErr, setLockErr] = useState<string | null>(null);
@@ -222,6 +295,7 @@ export function TimeSheetsPanel({
     return rows.filter((r) => {
       if (statusFilter === "approved") return r.reviewStatus === "approved";
       if (statusFilter === "pending") return r.reviewStatus === "pending";
+      if (statusFilter === "open") return r.reviewStatus === "open";
       return true;
     });
   }, [rows, statusFilter]);
@@ -274,50 +348,6 @@ export function TimeSheetsPanel({
 
   const hasCustomRange = Boolean(rangeFromYmd && rangeToYmd);
 
-  const timecardRows = useMemo(() => {
-    if (!timecardAnchorRow) return [];
-    // No fallback to the stale anchor here: when period nav swaps the pool to a
-    // window where this employee has no rows, returning [] lets the modal close
-    // cleanly rather than showing the old row out of context.
-    return modalPoolRows.filter((r) => r.employeeId === timecardAnchorRow.employeeId);
-  }, [modalPoolRows, timecardAnchorRow]);
-
-  /**
-   * Ordered, de-duplicated list of employee IDs present in the current period's pool.
-   * Drives Prev/Next user navigation inside the timecard modal. Order is the order
-   * in which each employee first appears in `modalPoolRows` so it stays stable
-   * across re-renders.
-   */
-  const orderedEmployeeIds = useMemo(() => {
-    const seen = new Set<string>();
-    const ordered: string[] = [];
-    for (const r of modalPoolRows) {
-      if (!seen.has(r.employeeId)) {
-        seen.add(r.employeeId);
-        ordered.push(r.employeeId);
-      }
-    }
-    return ordered;
-  }, [modalPoolRows]);
-
-  const timecardUserNav = useMemo(() => {
-    if (!timecardAnchorRow || orderedEmployeeIds.length === 0) {
-      return { idx: -1, prevId: null as string | null, nextId: null as string | null };
-    }
-    const idx = orderedEmployeeIds.indexOf(timecardAnchorRow.employeeId);
-    return {
-      idx,
-      prevId: idx > 0 ? orderedEmployeeIds[idx - 1] : null,
-      nextId: idx >= 0 && idx < orderedEmployeeIds.length - 1 ? orderedEmployeeIds[idx + 1] : null,
-    };
-  }, [orderedEmployeeIds, timecardAnchorRow]);
-
-  function selectEmployeeInPool(employeeId: string | null) {
-    if (!employeeId) return;
-    const anchor = modalPoolRows.find((r) => r.employeeId === employeeId);
-    if (anchor) setTimecardAnchorRow(anchor);
-  }
-
   function navigatePeriodPrev() {
     if (rangeFromYmd && rangeToYmd) {
       const n = shiftCustomRangeYmd(rangeFromYmd, rangeToYmd, -1);
@@ -364,6 +394,18 @@ export function TimeSheetsPanel({
     });
   }
 
+  function anchorYmd(d: Date): string {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  function syncTimesheetsUrl(q: URLSearchParams) {
+    const path = `/time-clock/${timeClockId}?${q.toString()}`;
+    window.history.replaceState(window.history.state, "", path);
+  }
+
   function pushTimesheetsQuery(updates: {
     period?: TimesheetPeriodKind;
     anchor?: Date;
@@ -371,27 +413,75 @@ export function TimeSheetsPanel({
     rangeTo?: string | null;
     clearCustomRange?: boolean;
   }) {
+    const gen = ++periodFetchGen.current;
+    const nextKind = updates.period ?? periodKind;
+    let nextRangeFrom = rangeFromYmd;
+    let nextRangeTo = rangeToYmd;
+
+    if (updates.clearCustomRange) {
+      nextRangeFrom = null;
+      nextRangeTo = null;
+    }
+    if (updates.rangeFrom !== undefined) nextRangeFrom = updates.rangeFrom;
+    if (updates.rangeTo !== undefined) nextRangeTo = updates.rangeTo;
+
+    let nextAnchorYmd: string | null = null;
+    if (nextRangeFrom && nextRangeTo) {
+      nextAnchorYmd = null;
+    } else if (updates.anchor) {
+      nextAnchorYmd = anchorYmd(updates.anchor);
+    } else if (updates.clearCustomRange) {
+      nextAnchorYmd = anchorYmd(updates.anchor ?? new Date());
+    } else {
+      nextAnchorYmd = anchorYmd(new Date(periodStartIso));
+    }
+
     const q = new URLSearchParams(searchParams.toString());
     q.set("view", "timesheets");
-    q.set("period", updates.period ?? periodKind);
-    if (updates.clearCustomRange) {
+    q.set("period", nextKind);
+    if (updates.clearCustomRange || (!nextRangeFrom && !nextRangeTo)) {
       q.delete("range_from");
       q.delete("range_to");
     }
-    if (updates.rangeFrom !== undefined) {
-      if (updates.rangeFrom) q.set("range_from", updates.rangeFrom);
-      else q.delete("range_from");
-    }
-    if (updates.rangeTo !== undefined) {
-      if (updates.rangeTo) q.set("range_to", updates.rangeTo);
-      else q.delete("range_to");
-    }
-    if (updates.rangeFrom && updates.rangeTo) {
+    if (nextRangeFrom) q.set("range_from", nextRangeFrom);
+    else q.delete("range_from");
+    if (nextRangeTo) q.set("range_to", nextRangeTo);
+    else q.delete("range_to");
+    if (nextRangeFrom && nextRangeTo) {
       q.delete("anchor");
-    } else if (updates.anchor) {
-      q.set("anchor", updates.anchor.toISOString());
+    } else if (nextAnchorYmd) {
+      q.set("anchor", nextAnchorYmd);
     }
-    router.push(`/time-clock/${timeClockId}?${q.toString()}`);
+
+    syncTimesheetsUrl(q);
+
+    startPeriodNav(async () => {
+      const r = await fetchTimesheetPeriod({
+        timeClockId,
+        locationId,
+        periodKind: nextKind,
+        periodConfig,
+        anchorYmd: nextAnchorYmd,
+        rangeFromYmd: nextRangeFrom,
+        rangeToYmd: nextRangeTo,
+      });
+      if (gen !== periodFetchGen.current) return;
+      if (!r.ok) {
+        setPeriodNavErr(r.error);
+        return;
+      }
+      setPeriodNavErr(null);
+      setActivePeriod({
+        rows: r.slice.rows,
+        holidays: r.slice.holidays,
+        payPeriodLock: r.slice.payPeriodLock,
+        periodKind: r.slice.periodKind,
+        periodStartIso: r.slice.periodStartIso,
+        periodEndExclusiveIso: r.slice.periodEndExclusiveIso,
+        rangeFromYmd: r.slice.rangeFromYmd,
+        rangeToYmd: r.slice.rangeToYmd,
+      });
+    });
   }
 
   const byEmployee = useMemo(() => {
@@ -437,19 +527,148 @@ export function TimeSheetsPanel({
     return list;
   }, [byEmployee, storeEmployees]);
 
+  const roleFilterOptions = useMemo(() => {
+    const roles = new Set<string>();
+    for (const e of storeEmployees) {
+      const role = e.role?.trim();
+      if (role) roles.add(role);
+    }
+    for (const e of byEmployee) {
+      const role = e.role?.trim();
+      if (role) roles.add(role);
+    }
+    return [...roles].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  }, [storeEmployees, byEmployee]);
+
+  const expandedFilterCount =
+    (filterRole ? 1 : 0) + (filterRoster !== "all" ? 1 : 0);
+
+  const rosterBase = useMemo(() => {
+    if (!canArchive) return byEmployee;
+    // Status / roster filters should not show the full zero-hour roster scaffold.
+    if (statusFilter !== "all" || filterRoster !== "all") return byEmployee;
+    return byEmployeeWithAll;
+  }, [canArchive, statusFilter, filterRoster, byEmployee, byEmployeeWithAll]);
+
   const filteredEmployees = useMemo(() => {
-    // Managers see the full store roster (including rows with no punches this period).
-    // Employees only see people who actually have punches in `rows` — no coworker
-    // names, no $0 payroll scaffolding for the whole team.
-    let list = canArchive ? byEmployeeWithAll : byEmployee;
+    // Managers see the full store roster (including rows with no punches this period)
+    // unless a status or roster filter is active.
+    // Employees only see people who actually have punches in `rows`.
+    let list = rosterBase;
     const q = query.trim().toLowerCase();
     if (q) {
       list = list.filter(
         (e) => e.name.toLowerCase().includes(q) || e.role.toLowerCase().includes(q),
       );
     }
+    if (filterRole) {
+      list = list.filter((e) => (e.role ?? "").trim() === filterRole);
+    }
+    if (filterRoster === "with_hours") {
+      list = list.filter((e) => e.rows.length > 0);
+    } else if (filterRoster === "no_hours") {
+      list = list.filter((e) => e.rows.length === 0);
+    }
     return list;
-  }, [byEmployeeWithAll, byEmployee, canArchive, query]);
+  }, [rosterBase, query, filterRole, filterRoster]);
+
+  useEffect(() => {
+    if (filterRole && !roleFilterOptions.includes(filterRole)) setFilterRole("");
+  }, [filterRole, roleFilterOptions]);
+
+  const timecardPeriodKey = `${periodStartIso}|${periodEndExclusiveIso}|${periodKind}`;
+
+  /** Employees: open the Connecteam-style detail table by default (one row in the grid). */
+  const employeeAutoTimecardAnchor = useMemo(() => {
+    if (canArchive) return null;
+    if (dismissedTimecardPeriodKey === timecardPeriodKey) return null;
+    if (filteredEmployees.length !== 1) return null;
+    const only = filteredEmployees[0];
+    if (only.rows.length === 0) return null;
+    return only.rows[only.rows.length - 1] ?? null;
+  }, [canArchive, filteredEmployees, timecardPeriodKey, dismissedTimecardPeriodKey]);
+
+  const openEmployeeTimecard = (e: EmployeeTimesheetRow) => {
+    setTimecardEmployeeId(e.employeeId);
+    setTimecardAnchorRow(e.rows.length > 0 ? (e.rows[e.rows.length - 1] ?? null) : null);
+  };
+
+  const activeTimecardEmployee = useMemo((): EmployeeTimesheetRow | null => {
+    if (timecardEmployeeId) {
+      return filteredEmployees.find((e) => e.employeeId === timecardEmployeeId) ?? null;
+    }
+    if (timecardAnchorRow) {
+      return filteredEmployees.find((e) => e.employeeId === timecardAnchorRow.employeeId) ?? null;
+    }
+    if (employeeAutoTimecardAnchor) {
+      return (
+        filteredEmployees.find((e) => e.employeeId === employeeAutoTimecardAnchor.employeeId) ??
+        null
+      );
+    }
+    return null;
+  }, [
+    timecardEmployeeId,
+    timecardAnchorRow,
+    employeeAutoTimecardAnchor,
+    filteredEmployees,
+  ]);
+
+  const activeTimecardOpen = activeTimecardEmployee != null;
+
+  useEffect(() => {
+    setModalPoolRows(initialModalPoolRows);
+    modalPoolLoadedRef.current = initialModalPoolRows.length > 0;
+    setModalPoolErr(null);
+  }, [serverPeriodKey, initialModalPoolRows]);
+
+  useEffect(() => {
+    if (modalPoolLoadedRef.current) return;
+    const gen = ++modalPoolFetchGen.current;
+    setModalPoolLoading(true);
+    setModalPoolErr(null);
+    void fetchTimecardModalPool({ timeClockId, locationId }).then((r) => {
+      if (gen !== modalPoolFetchGen.current) return;
+      setModalPoolLoading(false);
+      modalPoolLoadedRef.current = true;
+      if (r.ok) {
+        setModalPoolRows(r.rows);
+      } else {
+        setModalPoolErr(r.error);
+      }
+    });
+  }, [timeClockId, locationId, initialModalPoolRows.length, serverPeriodKey]);
+
+  const orderedEmployeeIds = useMemo(
+    () => filteredEmployees.map((e) => e.employeeId),
+    [filteredEmployees],
+  );
+
+  function selectEmployeeInPool(employeeId: string | null) {
+    if (!employeeId) return;
+    const emp = filteredEmployees.find((e) => e.employeeId === employeeId);
+    if (emp) openEmployeeTimecard(emp);
+  }
+
+  const timecardRows = useMemo(() => {
+    if (!activeTimecardEmployee) return [];
+    const id = activeTimecardEmployee.employeeId;
+    const fromPool = modalPoolRows.filter((r) => r.employeeId === id);
+    if (fromPool.length > 0) return fromPool;
+    return rows.filter((r) => r.employeeId === id);
+  }, [modalPoolRows, activeTimecardEmployee, rows]);
+
+  const timecardUserNav = useMemo(() => {
+    if (!activeTimecardEmployee || orderedEmployeeIds.length === 0) {
+      return { idx: -1, prevId: null as string | null, nextId: null as string | null };
+    }
+    const idx = orderedEmployeeIds.indexOf(activeTimecardEmployee.employeeId);
+    return {
+      idx,
+      prevId: idx > 0 ? orderedEmployeeIds[idx - 1] : null,
+      nextId: idx >= 0 && idx < orderedEmployeeIds.length - 1 ? orderedEmployeeIds[idx + 1] : null,
+    };
+  }, [orderedEmployeeIds, activeTimecardEmployee]);
 
   const rowsForExport = useMemo(
     () => filteredEmployees.flatMap((e) => e.rows),
@@ -631,6 +850,11 @@ export function TimeSheetsPanel({
           {approvalErr}
         </p>
       ) : null}
+      {periodNavErr ? (
+        <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">
+          {periodNavErr}
+        </p>
+      ) : null}
 
       {lockErr ? (
         <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">
@@ -710,7 +934,11 @@ export function TimeSheetsPanel({
             <div>
               <h2 className="text-sm font-semibold text-slate-800">Timesheets</h2>
               <p className="mt-0.5 text-xs text-slate-500">
-                {subtitle}. Green pill = total worked time that day · scroll horizontally when needed.
+                {subtitle}. Green pill = worked time that day.{" "}
+                <span className="font-medium text-slate-700">
+                  Click a name or hours to open the detailed timecard
+                  {periodKind === "bi_weekly" ? " (Week 1 & Week 2)" : ""}.
+                </span>
               </p>
             </div>
             {isPeriodLocked && payPeriodLock ? (
@@ -763,12 +991,12 @@ export function TimeSheetsPanel({
                   type="button"
                   onClick={() => setFiltersOpen((o) => !o)}
                   className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded border transition-colors ${
-                    filtersOpen
+                    filtersOpen || expandedFilterCount > 0
                       ? "border-sky-300 bg-sky-50 text-sky-700"
                       : "border-slate-200 bg-white text-sky-600 hover:bg-slate-50"
                   }`}
                   aria-expanded={filtersOpen}
-                  aria-label="Toggle filters"
+                  aria-label="Toggle employee filters"
                 >
                   <Filter className="h-4 w-4" />
                 </button>
@@ -801,10 +1029,12 @@ export function TimeSheetsPanel({
               </div>
 
               <TimesheetRangePicker
-                key={`${periodStartIso}-${periodEndExclusiveIso}`}
                 rangeLabel={rangeLabel}
                 periodStart={new Date(periodStartIso)}
                 periodEndInclusive={periodEndInclusive}
+                periodKind={periodKind}
+                periodConfig={periodConfig}
+                navigating={periodNavPending}
                 weekStartsOn={
                   ((typeof periodConfig.week_starts_on === "number"
                     ? periodConfig.week_starts_on
@@ -813,6 +1043,9 @@ export function TimeSheetsPanel({
                 hasCustomRange={hasCustomRange}
                 onApplyCustomRange={(fromYmd, toYmd) =>
                   pushTimesheetsQuery({ rangeFrom: fromYmd, rangeTo: toYmd })
+                }
+                onSelectPresetPeriod={(anchor) =>
+                  pushTimesheetsQuery({ anchor, clearCustomRange: true })
                 }
                 onClearCustomRange={() =>
                   pushTimesheetsQuery({ anchor: new Date(), clearCustomRange: true })
@@ -832,6 +1065,7 @@ export function TimeSheetsPanel({
                   aria-label="Status filter"
                 >
                   <option value="all">All statuses</option>
+                  <option value="open">Open shifts</option>
                   <option value="approved">Approved</option>
                   <option value="pending">Pending review</option>
                 </select>
@@ -978,69 +1212,60 @@ export function TimeSheetsPanel({
           </div>
 
           {canArchive && filtersOpen ? (
-            <div className="flex flex-col gap-3 rounded-2xl bg-slate-100/90 px-3 py-3 sm:flex-row sm:flex-wrap sm:items-center">
-              <span className="text-sm font-bold text-slate-800">Filter</span>
-              <div className="relative min-w-[7.25rem]">
-                <select
-                  disabled
-                  className="h-9 w-full cursor-not-allowed appearance-none rounded border border-slate-200/90 bg-white py-1.5 pl-3.5 pr-9 text-sm text-slate-500 opacity-90"
-                  title="Connect smart groups when ready"
-                >
-                  <option>Groups</option>
-                </select>
-                <ChevronDown
-                  className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400"
-                  aria-hidden
-                />
+            <div className="flex flex-col gap-3 rounded-2xl bg-slate-100/90 px-3 py-3 sm:flex-row sm:flex-wrap sm:items-end">
+              <div className="flex min-w-0 flex-1 flex-wrap items-end gap-3">
+                <label className="block min-w-[9rem] text-xs font-medium text-slate-600">
+                  Position
+                  <select
+                    value={filterRole}
+                    onChange={(e) => setFilterRole(e.target.value)}
+                    disabled={roleFilterOptions.length === 0}
+                    className="mt-1 h-9 w-full cursor-pointer appearance-none rounded border border-slate-200/90 bg-white py-1.5 pl-3.5 pr-9 text-sm text-slate-800 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
+                  >
+                    <option value="">
+                      {roleFilterOptions.length === 0 ? "No positions on file" : "All positions"}
+                    </option>
+                    {roleFilterOptions.map((role) => (
+                      <option key={role} value={role}>
+                        {role}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block min-w-[11rem] text-xs font-medium text-slate-600">
+                  Time entries
+                  <select
+                    value={filterRoster}
+                    onChange={(e) =>
+                      setFilterRoster(e.target.value as typeof filterRoster)
+                    }
+                    className="mt-1 h-9 w-full cursor-pointer appearance-none rounded border border-slate-200/90 bg-white py-1.5 pl-3.5 pr-9 text-sm text-slate-800"
+                  >
+                    <option value="all">All employees</option>
+                    <option value="with_hours">With time entries</option>
+                    <option value="no_hours">Without time entries</option>
+                  </select>
+                </label>
               </div>
-              <div className="relative min-w-[7.75rem]">
-                <select
-                  disabled
-                  className="h-9 w-full cursor-not-allowed appearance-none rounded border border-slate-200/90 bg-white py-1.5 pl-3.5 pr-9 text-sm text-slate-500 opacity-90"
-                  title="Department field — add to employees when ready"
-                >
-                  <option>Department</option>
-                </select>
-                <ChevronDown
-                  className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400"
-                  aria-hidden
-                />
+              <div className="flex flex-wrap items-center gap-2 sm:pb-0.5">
+                {expandedFilterCount > 0 ? (
+                  <button
+                    type="button"
+                    className="text-xs font-semibold text-sky-700 hover:underline"
+                    onClick={() => {
+                      setFilterRole("");
+                      setFilterRoster("all");
+                    }}
+                  >
+                    Clear filters
+                  </button>
+                ) : null}
+                <p className="text-xs text-slate-500">
+                  Showing {filteredEmployees.length} employee
+                  {filteredEmployees.length === 1 ? "" : "s"}
+                  {statusFilter !== "all" ? ` · status: ${statusFilter.replace("_", " ")}` : ""}
+                </p>
               </div>
-              <div className="relative min-w-[7.25rem]">
-                <select
-                  disabled
-                  className="h-9 w-full cursor-not-allowed appearance-none rounded border border-slate-200/90 bg-white py-1.5 pl-3.5 pr-9 text-sm text-slate-500 opacity-90"
-                  title="Use store / location scope from header when ready"
-                >
-                  <option>Branch</option>
-                </select>
-                <ChevronDown
-                  className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400"
-                  aria-hidden
-                />
-              </div>
-              <div className="relative min-w-[9rem]">
-                <select
-                  disabled
-                  className="h-9 w-full cursor-not-allowed appearance-none rounded border border-slate-200/90 bg-white py-1.5 pl-3.5 pr-9 text-sm text-slate-500 opacity-90"
-                  title="Direct manager — see employee profile fields when ready"
-                >
-                  <option>Direct manager</option>
-                </select>
-                <ChevronDown
-                  className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400"
-                  aria-hidden
-                />
-              </div>
-              <button
-                type="button"
-                disabled
-                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded border border-slate-200/90 bg-white text-sky-600 opacity-60"
-                title="Add filter — later"
-                aria-label="Add filter"
-              >
-                <Plus className="h-4 w-4" />
-              </button>
             </div>
           ) : null}
         </div>
@@ -1143,7 +1368,10 @@ export function TimeSheetsPanel({
               : "No time logs for you in this period. Try a different week or use Today to clock in."}
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <div
+            className={`overflow-x-auto transition-opacity duration-150 ${periodNavPending ? "pointer-events-none opacity-50" : ""}`}
+            aria-busy={periodNavPending}
+          >
             <div style={{ minWidth: Math.max(400, 260 + days.length * 52) }}>
               <div
                 className="grid border-b border-slate-200 bg-slate-100"
@@ -1210,7 +1438,8 @@ export function TimeSheetsPanel({
               {filteredEmployees.map((e) => {
                 const mins = minutesForEmployeeByDay.get(e.employeeId) ?? new Array(days.length).fill(0);
                 const totalPeriod = mins.reduce((a, b) => a + b, 0);
-                const canOpenAnyTimecard = e.rows.length > 0;
+                const canOpenTimecard = canArchive || e.rows.length > 0;
+                const canOpenAnyTimecard = canOpenTimecard;
                 const payable = payableByEmployeeId.get(e.employeeId) ?? null;
                 /** Currently clocked in — the row has at least one punch with no clock-out yet. */
                 const isCurrentlyClockedIn = e.rows.some((r) => !r.clockOutAt);
@@ -1238,12 +1467,12 @@ export function TimeSheetsPanel({
                       type="button"
                       className="sticky left-0 z-[1] border-r border-slate-200 bg-white px-3 py-2.5 text-left hover:bg-slate-50/80 sm:px-4 sm:py-3"
                       onClick={() => {
-                        if (!canOpenAnyTimecard) return;
-                        setTimecardAnchorRow(e.rows[e.rows.length - 1] ?? null);
+                        if (!canOpenTimecard) return;
+                        openEmployeeTimecard(e);
                       }}
-                      disabled={!canOpenAnyTimecard}
+                      disabled={!canOpenTimecard}
                       title={
-                        !canOpenAnyTimecard
+                        !canOpenTimecard
                           ? "No logged time for this team member in this period."
                           : "Open timecard"
                       }
@@ -1259,7 +1488,15 @@ export function TimeSheetsPanel({
                             <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
                           </span>
                         ) : null}
-                        <span className="truncate text-sm font-semibold text-slate-900">{e.name}</span>
+                        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-900">
+                          {e.name}
+                        </span>
+                        {canOpenAnyTimecard ? (
+                          <span className="hidden shrink-0 items-center gap-0.5 text-[11px] font-semibold text-sky-700 sm:inline-flex">
+                            View timecard
+                            <ChevronRight className="h-3.5 w-3.5" aria-hidden />
+                          </span>
+                        ) : null}
                       </div>
                       <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-slate-500">
                         <span className="rounded-md bg-slate-50 px-2 py-0.5 font-medium text-slate-700">
@@ -1333,7 +1570,7 @@ export function TimeSheetsPanel({
                       const dk = dayKeys[di];
                       const holiday = dk ? holidayByDayKey.get(dk) ?? null : null;
                       const isHolidayPayCell = has && !anchor && Boolean(holiday?.isPaid);
-                      const canOpenCell = Boolean(anchor) || canOpenAnyTimecard;
+                      const canOpenCell = canArchive || Boolean(anchor) || e.rows.length > 0;
                       // Heatmap tint — soft emerald wash on worked cells,
                       // soft amber on auto-credited holiday cells. Empty
                       // cells stay neutral so the eye glides past them.
@@ -1360,9 +1597,7 @@ export function TimeSheetsPanel({
                             canOpenCell ? (
                               <button
                                 type="button"
-                                onClick={() =>
-                                  setTimecardAnchorRow(anchor ?? e.rows[e.rows.length - 1] ?? null)
-                                }
+                                onClick={() => openEmployeeTimecard(e)}
                                 className={`inline-flex max-w-full items-center justify-center rounded-md px-1.5 py-1 text-[11px] font-semibold tabular-nums text-white shadow-sm sm:px-2 sm:text-sm ${
                                   isHolidayPayCell
                                     ? "bg-amber-600 hover:bg-amber-700"
@@ -1390,6 +1625,15 @@ export function TimeSheetsPanel({
                                 {isHolidayPayCell ? `Holiday ${formatHoursMinutes(m)}` : formatHoursMinutes(m)}
                               </span>
                             )
+                          ) : canArchive ? (
+                            <button
+                              type="button"
+                              onClick={() => openEmployeeTimecard(e)}
+                              className="rounded px-2 py-1 text-[10px] font-semibold text-sky-700 hover:bg-sky-50 sm:text-xs"
+                              title="Open timecard"
+                            >
+                              Open
+                            </button>
                           ) : (
                             <span className="text-[10px] text-slate-300 sm:text-xs">—</span>
                           )}
@@ -1412,10 +1656,20 @@ export function TimeSheetsPanel({
       ) : null}
 
       <EmployeeTimecardModal
-        key={timecardAnchorRow?.employeeId ?? "closed"}
-        open={timecardAnchorRow != null}
-        onClose={() => setTimecardAnchorRow(null)}
+        key={activeTimecardEmployee?.employeeId ?? "closed"}
+        open={activeTimecardOpen}
+        onClose={() => {
+          if (!canArchive && employeeAutoTimecardAnchor) {
+            setDismissedTimecardPeriodKey(timecardPeriodKey);
+          }
+          setTimecardAnchorRow(null);
+          setTimecardEmployeeId(null);
+        }}
         rows={timecardRows}
+        employeeId={activeTimecardEmployee?.employeeId}
+        employeeName={activeTimecardEmployee?.name}
+        employeeRole={activeTimecardEmployee?.role}
+        timeClockId={timeClockId}
         canEditJob={canArchive}
         canApprovePunches={canArchive}
         onApproveEntry={canArchive ? onApproveEntry : undefined}
@@ -1441,6 +1695,12 @@ export function TimeSheetsPanel({
         onNextUser={() => selectEmployeeInPool(timecardUserNav.nextId)}
         hasPrevUser={timecardUserNav.prevId != null}
         hasNextUser={timecardUserNav.nextId != null}
+        periodKind={periodKind}
+        periodStartIso={periodStartIso}
+        periodEndExclusiveIso={periodEndExclusiveIso}
+        weekStartsOn={
+          typeof periodConfig.week_starts_on === "number" ? periodConfig.week_starts_on : 1
+        }
       />
     </div>
   );

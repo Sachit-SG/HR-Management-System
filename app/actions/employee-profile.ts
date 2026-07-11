@@ -5,6 +5,8 @@ import { getRbacContext, hasPermission } from "@/lib/rbac/context";
 import { normalizeRoleLabel } from "@/lib/rbac/matrix";
 import { PERMISSIONS } from "@/lib/rbac/permissions";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { GENDER_VALUES, type GenderValue } from "@/lib/users/gender-options";
+import { syncEmployeeAdditionalStoreAssignments } from "@/lib/users/sync-employee-store-assignments";
 
 export type EmployeeProfilePayload = {
   first_name: string;
@@ -12,6 +14,8 @@ export type EmployeeProfilePayload = {
   mobile_phone: string;
   email: string;
   employment_start_date: string;
+  /** Calendar rehire date (YYYY-MM-DD). Clears accrual reset when empty. */
+  rehired_at?: string;
   /** Full-time equivalent (e.g. 1.0 full-time, 0.5 half-time). */
   fte: string;
   /** Optional target hours per week (informational; used for planning). */
@@ -21,6 +25,10 @@ export type EmployeeProfilePayload = {
   direct_manager_id: string;
   birth_date: string;
   employee_code: string;
+  /** Optional HR gender value; "" clears. */
+  gender?: GenderValue | "";
+  /** Store IDs beyond home `location_id` (multi-store employees). */
+  additional_location_ids?: string[];
   /**
    * Optional PTO classification override. "" / null = auto-detect from
    * role. Drives which vacation ladder applies (office vs. store
@@ -145,6 +153,30 @@ export async function updateEmployeeProfile(
   const birth_date = payload.birth_date.trim() || null;
   const employment_start_date = payload.employment_start_date.trim() || null;
 
+  let gender: string | null | undefined = undefined;
+  if (payload.gender !== undefined) {
+    const raw = payload.gender.trim();
+    if (raw === "") {
+      gender = null;
+    } else if (GENDER_VALUES.includes(raw as GenderValue)) {
+      gender = raw;
+    } else {
+      return { ok: false, error: "Invalid gender value." };
+    }
+  }
+
+  let rehiredAt: string | null | undefined = undefined;
+  if (payload.rehired_at !== undefined) {
+    const raw = payload.rehired_at.trim();
+    if (raw === "") {
+      rehiredAt = null;
+    } else if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      rehiredAt = `${raw}T12:00:00Z`;
+    } else {
+      return { ok: false, error: "Rehire date must be a valid calendar date." };
+    }
+  }
+
   const fteRaw = payload.fte.trim();
   const fteParsed = fteRaw ? Number.parseFloat(fteRaw) : 1.0;
   if (!Number.isFinite(fteParsed) || fteParsed <= 0 || fteParsed > 2) {
@@ -222,6 +254,8 @@ export async function updateEmployeeProfile(
     fte: fteParsed,
     standard_hours_per_week: standardHoursParsed,
   };
+  if (gender !== undefined) patch.gender = gender;
+  if (rehiredAt !== undefined) patch.rehired_at = rehiredAt;
   if (ptoCohort !== undefined) patch.pto_cohort = ptoCohort;
   if (terminationReason !== undefined) patch.termination_reason = terminationReason;
   if (terminationAt !== undefined) patch.termination_at = terminationAt;
@@ -232,6 +266,15 @@ export async function updateEmployeeProfile(
     .eq("id", id);
 
   if (error) return { ok: false, error: error.message };
+
+  if (payload.additional_location_ids !== undefined) {
+    const sync = await syncEmployeeAdditionalStoreAssignments(
+      id,
+      locationId,
+      payload.additional_location_ids,
+    );
+    if (!sync.ok) return sync;
+  }
 
   revalidatePath("/users");
   revalidatePath(`/users/${id}`);

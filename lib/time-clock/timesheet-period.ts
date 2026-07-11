@@ -300,6 +300,45 @@ export function enumerateDaysInPeriod(bounds: PeriodBounds): Date[] {
   return out;
 }
 
+/**
+ * Recent pay periods for the range-picker sidebar (current + prior windows).
+ * Order: newest first (index 0 = period containing `anchor`).
+ */
+export function listRecentPeriodPresets(
+  anchor: Date,
+  kind: TimesheetPeriodKind,
+  config: TimesheetPeriodConfig,
+  count = 12,
+): PeriodBounds[] {
+  const n = Math.max(1, Math.min(24, count));
+  const out: PeriodBounds[] = [];
+  let bounds = getPeriodBounds(anchor, kind, config);
+  out.push(bounds);
+  for (let i = 1; i < n; i++) {
+    const prevStart = shiftPeriodAnchor(bounds.start, kind, config, -1);
+    bounds = getPeriodBounds(prevStart, kind, config);
+    out.push(bounds);
+  }
+  return out;
+}
+
+export function periodKindPresetLabel(kind: TimesheetPeriodKind): string {
+  switch (kind) {
+    case "weekly":
+      return "Weekly periods";
+    case "bi_weekly":
+      return "Bi-weekly periods";
+    case "monthly":
+      return "Monthly periods";
+    case "semi_monthly":
+      return "Semi-monthly periods";
+    case "custom":
+      return "Custom split periods";
+    default:
+      return "Pay periods";
+  }
+}
+
 /** Format range label like 01/04 – 30/04 (DD/MM). */
 export function formatPeriodRangeLabel(bounds: PeriodBounds): string {
   const lastInclusive = new Date(bounds.endExclusive);

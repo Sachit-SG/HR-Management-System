@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { getPostSignOutRedirect, redirectAfterSignOut } from "@/lib/hub-app-url";
 
 type Props = {
   signedIn: boolean;
@@ -30,8 +31,13 @@ export function SidebarAccountFooter({
     setLoading(true);
     const supabase = createSupabaseBrowserClient();
     await supabase.auth.signOut();
+    const target = getPostSignOutRedirect("/login");
+    if (target.startsWith("http://") || target.startsWith("https://")) {
+      redirectAfterSignOut("/login");
+      return;
+    }
     router.refresh();
-    router.push("/login");
+    router.push(target);
     setLoading(false);
   }
 

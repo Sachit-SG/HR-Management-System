@@ -39,14 +39,17 @@ import {
   rollupTimeOffForEmployeeInRange,
   type TimeOffRecordForUi,
 } from "@/lib/time-clock/time-off-display";
+import type { TimesheetPeriodKind } from "@/lib/time-clock/timesheet-period";
+import { PunchTimeDisplay } from "@/components/time-clock/punch-time-display";
 import {
   dailyMinutesMap,
   formatHoursMinutes,
   formatSignedVarianceMinutes,
+  groupRowsIntoTimecardBlocks,
   localDayKey,
   punchMinutes,
-  startOfWeekMonday,
-  weekRangeLabel,
+  shortDateRangeLabel,
+  type TimecardPeriodBlock,
 } from "@/lib/time-clock/timecard-rollup";
 
 function reviewBadgeClass(status: EnrichedPunchRow["reviewStatus"]): string {
@@ -77,17 +80,6 @@ function jobPillClass(tone: EnrichedPunchRow["jobTone"]): string {
   }
 }
 
-function formatTimeOnly(iso: string): string {
-  try {
-    return new Date(iso).toLocaleTimeString(undefined, {
-      hour: "numeric",
-      minute: "2-digit",
-    });
-  } catch {
-    return "—";
-  }
-}
-
 function formatDayHeader(iso: string): string {
   try {
     return new Date(iso).toLocaleDateString(undefined, {
@@ -100,10 +92,21 @@ function formatDayHeader(iso: string): string {
   }
 }
 
+function initialsFromName(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0] ?? ""}${parts[parts.length - 1][0] ?? ""}`.toUpperCase();
+}
+
 type Props = {
   open: boolean;
   onClose: () => void;
   rows: EnrichedPunchRow[];
+  /** When the period has no punches yet, supply identity from the timesheet roster. */
+  employeeId?: string | null;
+  employeeName?: string | null;
+  employeeRole?: string | null;
   /** Context clock id (required for "Add shift"). */
   timeClockId?: string | null;
   /** Viewer’s employee id (used for self-service leave requests). */
@@ -173,17 +176,20 @@ type Props = {
    * modal keeps the user oriented when historical data is swapped in.
    */
   historicalNotice?: string | null;
-};
-
-type WeekBlock = {
-  monday: Date;
-  rows: EnrichedPunchRow[];
+  /** Pay-period context from Timesheets (drives Week 1 / Week 2 for bi-weekly). */
+  periodKind?: TimesheetPeriodKind | null;
+  periodStartIso?: string | null;
+  periodEndExclusiveIso?: string | null;
+  weekStartsOn?: number;
 };
 
 export function EmployeeTimecardModal({
   open,
   onClose,
   rows,
+  employeeId: employeeIdProp = null,
+  employeeName: employeeNameProp = null,
+  employeeRole: employeeRoleProp = null,
   timeClockId = null,
   viewerEmployeeId = null,
   ptoBalances = null,
@@ -209,6 +215,10 @@ export function EmployeeTimecardModal({
   hasPrevUser = false,
   hasNextUser = false,
   historicalNotice = null,
+  periodKind = null,
+  periodStartIso = null,
+  periodEndExclusiveIso = null,
+  weekStartsOn = 1,
 }: Props) {
   const [stableNowMs] = useState(() => Date.now());
   // Display filters & sort — applied to the table rows only, totals stay truthful
@@ -317,11 +327,76 @@ export function EmployeeTimecardModal({
 
   // Note: we intentionally do not reset UI subpanels via effects to satisfy lint rules.
 
+  const headerEmployee = useMemo(() => {
+    if (rows.length > 0) {
+      const sorted = [...rows].sort(
+        (a, b) => new Date(a.clockInAt).getTime() - new Date(b.clockInAt).getTime(),
+      );
+      const first = sorted[0];
+      return {
+        employeeId: first.employeeId,
+        employeeName: first.employeeName,
+        employeeRole: first.employeeRole,
+        initials: first.initials,
+      };
+    }
+    const id = employeeIdProp?.trim();
+    const name = employeeNameProp?.trim();
+    if (!id || !name) return null;
+    return {
+      employeeId: id,
+      employeeName: name,
+      employeeRole: employeeRoleProp?.trim() ?? "",
+      initials: initialsFromName(name),
+    };
+  }, [rows, employeeIdProp, employeeNameProp, employeeRoleProp]);
+
   const meta = useMemo(() => {
-    if (rows.length === 0) return null;
+    if (!headerEmployee) return null;
+
     const sorted = [...rows].sort(
       (a, b) => new Date(a.clockInAt).getTime() - new Date(b.clockInAt).getTime(),
     );
+
+    if (sorted.length === 0) {
+      const periodLabel =
+        periodLabelOverride ??
+        (periodStartIso && periodEndExclusiveIso
+          ? shortDateRangeLabel(
+              new Date(periodStartIso),
+              new Date(new Date(periodEndExclusiveIso).getTime() - 86_400_000),
+            )
+          : "Selected period");
+
+      let timeOffPaidM = 0;
+      let timeOffUnpaidM = 0;
+      if (timeOffRecords.length > 0 && periodStartIso && periodEndExclusiveIso) {
+        const roll = rollupTimeOffForEmployeeInRange(
+          headerEmployee.employeeId,
+          timeOffRecords,
+          new Date(periodStartIso),
+          new Date(periodEndExclusiveIso),
+        );
+        timeOffPaidM = roll.paidMinutes;
+        timeOffUnpaidM = roll.unpaidMinutes;
+      }
+
+      return {
+        first: sorted[0] ?? null,
+        byDay: new Map<string, number>(),
+        totalPaid: 0,
+        workedDays: 0,
+        weekBlocks: [] as TimecardPeriodBlock[],
+        totalVariance: 0,
+        varianceCount: 0,
+        totalRowCount: 0,
+        displayRowCount: 0,
+        periodLabel,
+        timeOffPaidM,
+        timeOffUnpaidM,
+      };
+    }
+
     const first = sorted[0];
     const last = sorted[sorted.length - 1];
     const byDay = dailyMinutesMap(sorted);
@@ -348,20 +423,16 @@ export function EmployeeTimecardModal({
       return isTimeOff(r);
     });
 
-    const byWeek = new Map<number, EnrichedPunchRow[]>();
-    for (const row of displayRows) {
-      const mon = startOfWeekMonday(new Date(row.clockInAt));
-      const t = mon.getTime();
-      if (!byWeek.has(t)) byWeek.set(t, []);
-      byWeek.get(t)!.push(row);
-    }
-    const weekEntries = [...byWeek.entries()].sort((a, b) =>
-      sortDir === "asc" ? a[0] - b[0] : b[0] - a[0],
+    const weekBlocks: TimecardPeriodBlock[] = groupRowsIntoTimecardBlocks(
+      displayRows,
+      {
+        periodKind,
+        periodStartIso,
+        periodEndExclusiveIso,
+        weekStartsOn,
+      },
+      sortDir,
     );
-    const weekBlocks: WeekBlock[] = weekEntries.map(([t, rs]) => ({
-      monday: new Date(t),
-      rows: sortDir === "asc" ? rs : [...rs].reverse(),
-    }));
 
     const periodStart = new Date(first.clockInAt).toLocaleDateString(undefined, {
       month: "2-digit",
@@ -405,7 +476,19 @@ export function EmployeeTimecardModal({
       timeOffPaidM,
       timeOffUnpaidM,
     };
-  }, [rows, timeOffRecords, stableNowMs, typeFilter, sortDir]);
+  }, [
+    rows,
+    headerEmployee,
+    timeOffRecords,
+    stableNowMs,
+    typeFilter,
+    sortDir,
+    periodKind,
+    periodStartIso,
+    periodEndExclusiveIso,
+    weekStartsOn,
+    periodLabelOverride,
+  ]);
 
   const [jobOverrides, setJobOverrides] = useState<Record<string, PositionRoleValue | undefined>>(
     {},
@@ -419,32 +502,23 @@ export function EmployeeTimecardModal({
   /** Same-store roster for time off; falls back to the open timecard employee only. */
   const roster = useMemo(() => {
     if (storeEmployees.length > 0) return storeEmployees;
-    if (rows.length === 0) return [];
-    const r0 = [...rows].sort(
-      (a, b) => new Date(a.clockInAt).getTime() - new Date(b.clockInAt).getTime(),
-    )[0];
-    return [{ id: r0.employeeId, fullName: r0.employeeName }];
-  }, [storeEmployees, rows]);
+    if (!headerEmployee) return [];
+    return [{ id: headerEmployee.employeeId, fullName: headerEmployee.employeeName }];
+  }, [storeEmployees, headerEmployee]);
 
-  if (!open || !meta) return null;
+  const [draftRange, setDraftRange] = useState<{ from?: Date; to?: Date }>({});
 
-  const {
-    first,
-    byDay,
-    totalPaid,
-    workedDays,
-    weekBlocks,
-    periodLabel,
-    timeOffPaidM,
-    totalRowCount,
-    displayRowCount,
-  } = meta;
+  if (!open || !headerEmployee || !meta) return null;
+
+  const { first, byDay, totalPaid, workedDays, weekBlocks, periodLabel, timeOffPaidM, totalRowCount, displayRowCount } =
+    meta;
+  const subjectEmployeeId = first?.employeeId ?? headerEmployee.employeeId;
 
   // Aggregate timesheet status used for the header pill. Order of precedence:
   // open shifts first (most urgent), then pending leave, then approved.
   const openShiftsCount = rows.filter((r) => !r.clockOutAt).length;
   const pendingLeaveCount = pendingTimeOffRequests.filter(
-    (p) => p.employeeId === first.employeeId,
+    (p) => p.employeeId === subjectEmployeeId,
   ).length;
   const closedRows = rows.filter((r) => r.clockOutAt);
   const allApproved =
@@ -494,20 +568,10 @@ export function EmployeeTimecardModal({
   // Default highlighted month for the calendar = the first clock-in date in
   // the period. Falls back to today if the period somehow has no rows.
   const periodAnchorDate = (() => {
-    const firstIso = first.clockInAt;
+    const firstIso = first?.clockInAt ?? periodStartIso;
     const d = firstIso ? new Date(firstIso) : new Date();
     return Number.isNaN(d.getTime()) ? new Date() : d;
   })();
-
-  // Draft range while the user is choosing inside the popover. We only fire
-  // `onPickPeriodRange` when they hit "Apply" (or a preset) so half-finished
-  // clicks don't churn the parent's URL / data.
-  const [draftRange, setDraftRange] = useState<{ from?: Date; to?: Date }>({});
-  useEffect(() => {
-    if (periodPickerOpen) {
-      setDraftRange({});
-    }
-  }, [periodPickerOpen]);
 
   const startOfDay = (d: Date) => {
     const x = new Date(d);
@@ -650,7 +714,7 @@ export function EmployeeTimecardModal({
         onClick={onClose}
       />
       <div
-        className="relative flex h-[90vh] max-h-[90vh] w-[98%] max-w-none flex-col overflow-hidden rounded-t-xl border border-slate-300 bg-white shadow-2xl"
+        className="relative flex h-[90vh] max-h-[90vh] w-[98%] max-w-none flex-col overflow-hidden rounded-t-xl border border-slate-300 bg-white shadow-e3"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Top strip: prev/next user nav flank the centered Close. */}
@@ -693,11 +757,11 @@ export function EmployeeTimecardModal({
               className="flex h-12 w-12 shrink-0 items-center justify-center rounded border border-slate-200 bg-slate-100 text-sm font-bold text-slate-800"
               aria-hidden
             >
-              {first.initials}
+              {headerEmployee.initials}
             </span>
             <div className="min-w-0">
               <h2 id="timecard-title" className="truncate text-base font-bold text-slate-900">
-                {first.employeeName}
+                {headerEmployee.employeeName}
               </h2>
               <div className="mt-1 flex flex-wrap items-center gap-1.5 text-sm text-slate-600">
                 <button
@@ -714,7 +778,13 @@ export function EmployeeTimecardModal({
                   <div className="relative" ref={periodPickerRef}>
                     <button
                       type="button"
-                      onClick={() => setPeriodPickerOpen((o) => !o)}
+                      onClick={() =>
+                        setPeriodPickerOpen((o) => {
+                          const next = !o;
+                          if (next) setDraftRange({});
+                          return next;
+                        })
+                      }
                       aria-expanded={periodPickerOpen}
                       aria-haspopup="dialog"
                       title="Pick a date range to view"
@@ -744,7 +814,7 @@ export function EmployeeTimecardModal({
                       <div
                         role="dialog"
                         aria-label="Pick date range"
-                        className="absolute left-1/2 top-full z-[110] mt-2 flex -translate-x-1/2 overflow-hidden rounded-xl border border-slate-200 bg-white text-xs shadow-xl"
+                        className="absolute left-1/2 top-full z-[110] mt-2 flex -translate-x-1/2 overflow-hidden rounded-xl border border-slate-200 bg-white text-xs shadow-e3"
                         style={{
                           // Tighten react-day-picker's defaults so the popover
                           // doesn't take half the screen.
@@ -955,7 +1025,7 @@ export function EmployeeTimecardModal({
                 </div>
               </div>
               <Link
-                href={`/users/${first.employeeId}`}
+                href={`/users/${subjectEmployeeId}`}
                 className="mt-1 inline-block text-xs font-medium text-slate-600 underline decoration-slate-300 underline-offset-2 hover:text-slate-900"
               >
                 User profile
@@ -1106,13 +1176,14 @@ export function EmployeeTimecardModal({
         {/* CRITICAL: Horizontal scrolling container for 13-column layout */}
         <div className="min-h-0 flex-1 overflow-auto">
           <div className="w-full overflow-x-auto">
-            <table className="w-full min-w-[92rem] table-fixed border-collapse text-left text-sm text-slate-800">
+            <table className="w-full min-w-[104rem] table-fixed border-collapse text-left text-sm text-slate-800">
               <colgroup>
                 <col className="w-[8.5rem]" />
                 <col className="w-[7.5rem]" />
                 <col className="w-[14rem]" />
                 <col className="w-[6rem]" />
                 <col className="w-[6rem]" />
+                <col className="w-[7.5rem]" />
                 <col className="w-[7.5rem]" />
                 <col className="w-[7.5rem]" />
                 <col className="w-[7.5rem]" />
@@ -1130,6 +1201,8 @@ export function EmployeeTimecardModal({
                 <th className={`${thPad} ${cellBorder}`}>End</th>
                 <th className={`${thPad} ${cellBorder}`}>Total hours</th>
                 <th className={`${thPad} ${cellBorder}`}>Daily total</th>
+                <th className={`${thPad} ${cellBorder}`}>Scheduled</th>
+                <th className={`${thPad} ${cellBorder}`}>Difference</th>
                 <th className={`${thPad} ${cellBorder}`}>Weekly total</th>
                 <th className={`${thPad} ${cellBorder}`}>Leave Hours</th>
                 <th className={`${thPad} ${cellBorder}`}>Leave Type</th>
@@ -1141,42 +1214,60 @@ export function EmployeeTimecardModal({
               {weekBlocks.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={12}
+                    colSpan={14}
                     className="px-5 py-10 text-center text-sm text-slate-500"
                   >
-                    No entries match the current filter.{" "}
-                    <button
-                      type="button"
-                      onClick={() => setTypeFilter("all")}
-                      className="font-semibold text-orange-700 underline-offset-2 hover:underline"
-                    >
-                      Clear filter
-                    </button>
+                    {totalRowCount === 0 ? (
+                      <>
+                        No time entries in this period.
+                        {canManageTimeEntries ? " Use Add to log a shift or time off." : ""}
+                      </>
+                    ) : (
+                      <>
+                        No entries match the current filter.{" "}
+                        <button
+                          type="button"
+                          onClick={() => setTypeFilter("all")}
+                          className="font-semibold text-orange-700 underline-offset-2 hover:underline"
+                        >
+                          Clear filter
+                        </button>
+                      </>
+                    )}
                   </td>
                 </tr>
               ) : null}
               {weekBlocks.map((block) => {
-                const sunday = new Date(block.monday);
-                sunday.setDate(sunday.getDate() + 6);
-                const weekLabel = weekRangeLabel(block.monday, sunday);
+                const rangeLabel = shortDateRangeLabel(block.rangeStart, block.rangeEndInclusive);
+                const bandTitle = block.weekIndexLabel
+                  ? `${block.weekIndexLabel} · ${rangeLabel}`
+                  : rangeLabel;
                 const weekMinutes = block.rows.reduce((sum, r) => sum + (punchMinutes(r) ?? 0), 0);
                 return (
-                  <Fragment key={block.monday.getTime()}>
+                  <Fragment key={block.key}>
                     <tr className="bg-slate-200/90">
-                      <td colSpan={12} className="px-5 py-2.5 text-center text-sm font-bold text-slate-800">
-                        {weekLabel}
+                      <td
+                        colSpan={14}
+                        className="px-5 py-2.5 text-sm font-bold text-slate-800"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span>{bandTitle}</span>
+                          <span className="font-mono tabular-nums text-slate-900">
+                            {formatHoursMinutes(weekMinutes)}
+                          </span>
+                        </div>
                       </td>
                     </tr>
                     {block.rows.map((r, idx) => {
                       const dk = localDayKey(r.clockInAt);
                       const daySum = dk ? (byDay.get(dk) ?? 0) : 0;
                       const isLast = idx === block.rows.length - 1;
-                      const isSelf = Boolean(viewerEmployeeId && viewerEmployeeId === first.employeeId);
+                      const isSelf = Boolean(viewerEmployeeId && viewerEmployeeId === subjectEmployeeId);
                       const approvedLeave =
                         dk && timeOffRecords.length > 0
                           ? timeOffRecords.find(
                               (rec) =>
-                                rec.employee_id === first.employeeId &&
+                                rec.employee_id === subjectEmployeeId &&
                                 overlapsLocalDay(rec.start_at, rec.end_at, dk),
                             ) ?? null
                           : null;
@@ -1184,7 +1275,7 @@ export function EmployeeTimecardModal({
                         dk && pendingTimeOffRequests.length > 0
                           ? pendingTimeOffRequests.find(
                               (pr) =>
-                                pr.employeeId === first.employeeId &&
+                                pr.employeeId === subjectEmployeeId &&
                                 overlapsLocalDay(pr.startAt, pr.endAt, dk),
                             ) ?? null
                           : null;
@@ -1245,17 +1336,34 @@ export function EmployeeTimecardModal({
                               </select>
                             </div>
                           </td>
-                          <td className={`${cellBorder} ${tdPad} whitespace-nowrap tabular-nums font-semibold text-emerald-700`}>
-                            {formatTimeOnly(r.clockInAt)}
+                          <td className={`${cellBorder} ${tdPad} whitespace-nowrap font-semibold text-emerald-700`}>
+                            <PunchTimeDisplay iso={r.clockInAt} variant="time" />
                           </td>
-                          <td className={`${cellBorder} ${tdPad} whitespace-nowrap tabular-nums font-semibold text-slate-500`}>
-                            {r.clockOutAt ? formatTimeOnly(r.clockOutAt) : "—"}
+                          <td className={`${cellBorder} ${tdPad} whitespace-nowrap font-semibold text-slate-500`}>
+                            <PunchTimeDisplay iso={r.clockOutAt} variant="time" />
                           </td>
                           <td className={`${cellBorder} ${tdPad} font-mono text-sm tabular-nums text-slate-800`}>
                             {r.dailyTotalLabel}
                           </td>
                           <td className={`${cellBorder} ${tdPad} font-mono text-sm font-bold tabular-nums text-slate-900`}>
                             {formatHoursMinutes(daySum)}
+                          </td>
+                          <td
+                            className={`${cellBorder} ${tdPad} whitespace-nowrap text-sm tabular-nums text-slate-700`}
+                            title={r.scheduleLabel ?? undefined}
+                          >
+                            {r.scheduledDurationLabel ?? r.scheduleLabel ?? (
+                              <span className="text-slate-400">—</span>
+                            )}
+                          </td>
+                          <td
+                            className={`${cellBorder} ${tdPad} font-mono text-sm font-bold tabular-nums ${
+                              r.scheduleVarianceMinutes != null && r.scheduleVarianceMinutes < 0
+                                ? "text-red-600"
+                                : "text-slate-800"
+                            }`}
+                          >
+                            {formatSignedVarianceMinutes(r.scheduleVarianceMinutes)}
                           </td>
                           <td className={`${cellBorder} ${tdPad} text-right font-mono text-sm font-bold tabular-nums text-slate-900`}>
                             {isLast ? formatHoursMinutes(weekMinutes) : ""}
@@ -1370,7 +1478,7 @@ export function EmployeeTimecardModal({
                                     setLeaveActionPending(true);
                                     const res = await requestEmployeeTimeOff({
                                       locationId: locationId.trim(),
-                                      employeeId: first.employeeId,
+                                      employeeId: subjectEmployeeId,
                                       timeOffType: type,
                                       allDay: false,
                                       startAtIso: startIso,
@@ -1442,7 +1550,7 @@ export function EmployeeTimecardModal({
             }}
           >
             <div
-              className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl"
+              className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-e3"
               onClick={(e) => e.stopPropagation()}
             >
               <h3 id="adjust-time-entry-title" className="text-lg font-semibold text-slate-900">
@@ -1552,8 +1660,8 @@ export function EmployeeTimecardModal({
         <TimeOffRequestSidebar
           open={timeOffOpen}
           onClose={() => setTimeOffOpen(false)}
-          defaultEmployeeId={first.employeeId}
-          defaultEmployeeName={first.employeeName}
+          defaultEmployeeId={subjectEmployeeId}
+          defaultEmployeeName={headerEmployee.employeeName}
           storeEmployees={roster}
           locationId={locationId}
           onSaved={onPunchAdjusted}
@@ -1572,7 +1680,7 @@ export function EmployeeTimecardModal({
             }}
           >
             <div
-              className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl"
+              className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-5 shadow-e3"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-start justify-between gap-3">

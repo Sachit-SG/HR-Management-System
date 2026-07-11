@@ -29,12 +29,14 @@ const employee: Permission[] = [
   PERMISSIONS.SCHEDULE_VIEW,
 ];
 
+/** Office / shift lead: operations plus read-only user directory (no USERS_MANAGE). */
 const shiftLead: Permission[] = [
   ...employee,
   PERMISSIONS.ACTIVITY_VIEW,
   PERMISSIONS.LABOR_REPORT_VIEW,
   PERMISSIONS.TIME_CLOCK_MANAGE,
   PERMISSIONS.SCHEDULE_EDIT,
+  PERMISSIONS.USERS_VIEW,
 ];
 
 const storeManager: Permission[] = [

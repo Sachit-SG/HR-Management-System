@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { getPostSignOutRedirect, redirectAfterSignOut } from "@/lib/hub-app-url";
 
 type Props = {
   displayName: string;
@@ -45,8 +46,15 @@ export function AccountMenu({
     const supabase = createSupabaseBrowserClient();
     await supabase.auth.signOut();
     setOpen(false);
+    const authEnabled = process.env.NEXT_PUBLIC_AUTH_ENABLED === "true";
+    const fallback = authEnabled ? "/login" : "/";
+    const target = getPostSignOutRedirect(fallback);
+    if (target.startsWith("http://") || target.startsWith("https://")) {
+      redirectAfterSignOut(fallback);
+      return;
+    }
     router.refresh();
-    router.push(process.env.NEXT_PUBLIC_AUTH_ENABLED === "true" ? "/login" : "/");
+    router.push(target);
     setLoading(false);
   }
 

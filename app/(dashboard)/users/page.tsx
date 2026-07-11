@@ -66,8 +66,9 @@ export default async function UsersPage({ searchParams }: UsersPageProps) {
     !rbac.enabled ||
     hasPermission(rbac, PERMISSIONS.ORG_OWNER) ||
     hasPermission(rbac, PERMISSIONS.USERS_MANAGE);
-  const canBulkAddFromAdminsTab =
+  const canManageUsers =
     !rbac.enabled || hasPermission(rbac, PERMISSIONS.USERS_MANAGE);
+  const canBulkAddFromAdminsTab = canManageUsers;
   const canEditJobTitles =
     !rbac.enabled ||
     hasPermission(rbac, PERMISSIONS.USERS_MANAGE) ||
@@ -201,6 +202,7 @@ export default async function UsersPage({ searchParams }: UsersPageProps) {
             canEditAdminAccess={canEditAdminAccess}
             canPromoteToAdmin={canPromoteToAdmin}
             canBulkAddFromAdminsTab={canBulkAddFromAdminsTab}
+            canManageUsers={canManageUsers}
             canEditJobTitles={canEditJobTitles}
             canSetOrgOwner={canSetOrgOwner}
             initialSearchQuery={initialSearchQ}

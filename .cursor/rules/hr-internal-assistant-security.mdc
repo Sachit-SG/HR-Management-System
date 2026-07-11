@@ -1,0 +1,29 @@
+---
+description: Gate Hub AI / internal assistant work — read capability map before changing connector APIs
+globs: app/api/internal/**,lib/internal-assistant/**,docs/HR-HUB-CONNECTOR-SPEC-v1.md
+alwaysApply: false
+---
+
+# HR internal assistant — security gate
+
+You are touching **Hub ↔ HR connector** code or docs. Stop and read **`docs/HR-DATA-ACCESS-CAPABILITY-MAP.md`** first.
+
+## Non-negotiables
+
+1. **Pilot uses the HR web app**, not Hub chat. Do not block product work on assistant RBAC unless the task is explicitly Hub AI.
+2. **`/api/internal/assistant/*` is API-key auth today** — that does **not** protect against a Hub user asking the assistant for another employee's PTO. Per-user enforcement belongs in HR services (and Hub should send user context headers).
+3. **Minimize fields** in assistant JSON — do not return full employee records when a count or name suffices (Store Info audit lesson).
+4. **Never log** emails, PTO balances, or full roster payloads in `[HR][INTERNAL_ASSISTANT]` logs.
+
+## Before shipping new assistant endpoints or enabling Hub HR tools
+
+- [ ] Role tier defined (employee / manager / admin)
+- [ ] Store scope enforced for managers
+- [ ] Hub user headers agreed with platform team (Phase 1D)
+- [ ] Checklist in capability map completed or explicitly waived by owner
+
+## Do not
+
+- Add broad "HR details" mega-endpoints
+- Enable Hub LLM HR tools for all `STAFF` without HR-side filters
+- Confuse this with ADP/payroll integration

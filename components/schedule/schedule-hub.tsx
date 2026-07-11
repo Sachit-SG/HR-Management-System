@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useMemo, useState, useTransition } from "react";
-import { CalendarRange, Filter, Search } from "lucide-react";
+import { CalendarRange, Search } from "lucide-react";
 import { PRIMARY_ORANGE_CTA } from "@/lib/ui/primary-orange-cta";
 
 export type ScheduleCard = {
@@ -127,22 +127,13 @@ export function ScheduleHub({
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
           <input
             type="search"
-            placeholder="Search"
+            placeholder="Search schedules"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm text-slate-800 placeholder:text-slate-400 focus:border-orange-400 focus:outline-none focus:ring-2 focus:ring-orange-500/20"
             aria-label="Search schedules"
           />
         </div>
-        <button
-          type="button"
-          className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
-          disabled
-          title="Filters — connect to your data model when ready."
-        >
-          <Filter className="h-4 w-4 text-slate-400" aria-hidden />
-          Filter
-        </button>
       </div>
 
       {filtered.length === 0 ? (

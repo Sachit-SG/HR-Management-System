@@ -33,6 +33,7 @@ import { archiveEmployee, restoreEmployee } from "@/app/actions/archive-employee
 import { setEmployeeOrgOwner } from "@/app/actions/org-owner-role";
 import { PRIMARY_ORANGE_CTA } from "@/lib/ui/primary-orange-cta";
 import { POSITION_ROLE_OPTIONS } from "@/lib/users/position-options";
+import { GENDER_OPTIONS } from "@/lib/users/gender-options";
 
 export type ProfileLocationOption = { id: string; name: string };
 
@@ -57,6 +58,7 @@ export type EmployeeProfileInitial = {
   location_id: string;
   direct_manager_id: string;
   birth_date: string;
+  gender: string;
   employee_code: string;
   kiosk_code: string;
   /** Lifecycle: active / inactive / archived (from `employees.status`). */
@@ -92,6 +94,8 @@ function fmtDisplayDateTime(iso: string | null | undefined): string {
 
 type Props = {
   initial: EmployeeProfileInitial;
+  /** Extra stores beyond `initial.location_id` (home store). */
+  additionalLocationIds?: string[];
   locations: ProfileLocationOption[];
   storeManagers: ProfileManagerOption[];
   groupNames: string[];
@@ -138,6 +142,7 @@ type Props = {
 
 export function EmployeeProfileClient({
   initial,
+  additionalLocationIds = [],
   locations,
   storeManagers,
   groupNames,
@@ -165,6 +170,10 @@ export function EmployeeProfileClient({
   const [employment_start_date, setEmploymentStart] = useState(
     toInputDate(initial.employment_start_date),
   );
+  const [rehire_date, setRehireDate] = useState(toInputDate(rehiredAt));
+  useEffect(() => {
+    setRehireDate(toInputDate(rehiredAt));
+  }, [rehiredAt]);
   const [fte, setFte] = useState(initial.fte ?? "1.0");
   const [standard_hours_per_week, setStandardHoursPerWeek] = useState(
     initial.standard_hours_per_week ?? "",
@@ -173,6 +182,13 @@ export function EmployeeProfileClient({
   const [location_id, setLocationId] = useState(initial.location_id);
   const [direct_manager_id, setDirectManagerId] = useState(initial.direct_manager_id);
   const [birth_date, setBirthDate] = useState(toInputDate(initial.birth_date));
+  const [gender, setGender] = useState(initial.gender ?? "");
+  const [additional_location_ids, setAdditionalLocationIds] = useState<string[]>(
+    additionalLocationIds,
+  );
+  useEffect(() => {
+    setAdditionalLocationIds(additionalLocationIds);
+  }, [additionalLocationIds]);
   const [employee_code, setEmployeeCode] = useState(initial.employee_code);
   // PTO policy + termination (Owner-only fields; we always carry the state
   // even for non-owners so the readout reflects the saved value).
@@ -197,6 +213,25 @@ export function EmployeeProfileClient({
     [storeManagers, location_id],
   );
 
+  const additionalStoreOptions = useMemo(
+    () => locations.filter((l) => l.id !== location_id),
+    [locations, location_id],
+  );
+
+  const additionalStoreNames = useMemo(
+    () =>
+      additional_location_ids
+        .map((id) => locations.find((l) => l.id === id)?.name)
+        .filter(Boolean) as string[],
+    [additional_location_ids, locations],
+  );
+
+  const toggleAdditionalStore = useCallback((storeId: string) => {
+    setAdditionalLocationIds((prev) =>
+      prev.includes(storeId) ? prev.filter((id) => id !== storeId) : [...prev, storeId],
+    );
+  }, []);
+
   const onSubmit = useCallback(
     (e: React.FormEvent) => {
       e.preventDefault();
@@ -207,13 +242,16 @@ export function EmployeeProfileClient({
         mobile_phone,
         email,
         employment_start_date,
+        rehired_at: rehire_date,
         fte,
         standard_hours_per_week,
         role,
         location_id,
         direct_manager_id,
         birth_date,
+        gender: gender as EmployeeProfilePayload["gender"],
         employee_code,
+        additional_location_ids,
         // Owner-only fields. Server ignores when caller lacks ORG_OWNER.
         pto_cohort: pto_cohort as EmployeeProfilePayload["pto_cohort"],
         termination_reason:
@@ -237,13 +275,16 @@ export function EmployeeProfileClient({
       mobile_phone,
       email,
       employment_start_date,
+      rehire_date,
       fte,
       standard_hours_per_week,
       role,
       location_id,
       direct_manager_id,
       birth_date,
+      gender,
       employee_code,
+      additional_location_ids,
       pto_cohort,
       termination_reason,
       termination_at,
@@ -356,9 +397,18 @@ export function EmployeeProfileClient({
               {storeName ? (
                 <span className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-800 shadow-sm ring-1 ring-slate-200">
                   <MapPin className="h-3.5 w-3.5 text-orange-600" aria-hidden />
-                  {storeName}
+                  Home: {storeName}
                 </span>
               ) : null}
+              {additionalStoreNames.map((name) => (
+                <span
+                  key={name}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-orange-50 px-3 py-1 text-xs font-semibold text-orange-950 ring-1 ring-orange-200/80"
+                >
+                  <MapPin className="h-3.5 w-3.5 text-orange-600" aria-hidden />
+                  Also: {name}
+                </span>
+              ))}
               {role ? (
                 /*
                  * Role badge — louder than the store chip on purpose. The role
@@ -508,6 +558,25 @@ export function EmployeeProfileClient({
                   autoComplete="tel"
                 />
               </div>
+              <div className="sm:col-span-1">
+                <label className={labelCls} htmlFor="gender">
+                  <UserRound className="h-3.5 w-3.5" aria-hidden />
+                  Gender
+                </label>
+                <select
+                  id="gender"
+                  className={inputCls}
+                  value={gender}
+                  onChange={(e) => setGender(e.target.value)}
+                  disabled={!canEdit || pending}
+                >
+                  {GENDER_OPTIONS.map((opt) => (
+                    <option key={opt.value || "unset"} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <div className="sm:col-span-2">
                 <label className={labelCls} htmlFor="email">
                   <Mail className="h-3.5 w-3.5" aria-hidden />
@@ -532,13 +601,14 @@ export function EmployeeProfileClient({
               <h2 className="text-sm font-semibold text-slate-900">Work</h2>
             </div>
             <p className="mt-0.5 text-xs text-slate-500">
-              Title, store, reporting line, and HR identifiers.
+              Title, store, reporting line, and HR identifiers. Hire and rehire dates drive
+              vacation and sick accrual tiers.
             </p>
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
               <div className="sm:col-span-1">
                 <label className={labelCls} htmlFor="employment_start_date">
                   <Calendar className="h-3.5 w-3.5" aria-hidden />
-                  Employment start date
+                  Hire date
                 </label>
                 <input
                   id="employment_start_date"
@@ -548,15 +618,27 @@ export function EmployeeProfileClient({
                   onChange={(e) => setEmploymentStart(e.target.value)}
                   disabled={!canEdit || pending}
                 />
-                {rehiredAt ? (
-                  <p
-                    className="mt-1.5 inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-900 ring-1 ring-amber-200/80"
-                    title="This employee was archived and later restored. The original start date above is preserved."
-                  >
-                    <span aria-hidden>↩</span>
-                    Rehired: {fmtDisplayDateTime(rehiredAt)}
-                  </p>
-                ) : null}
+                <p className="mt-1 text-xs text-slate-500">
+                  Original start date. Used for PTO when no rehire date is set.
+                </p>
+              </div>
+              <div className="sm:col-span-1">
+                <label className={labelCls} htmlFor="rehire_date">
+                  <CalendarDays className="h-3.5 w-3.5" aria-hidden />
+                  Rehire date
+                </label>
+                <input
+                  id="rehire_date"
+                  type="date"
+                  className={inputCls}
+                  value={rehire_date}
+                  onChange={(e) => setRehireDate(e.target.value)}
+                  disabled={!canEdit || pending}
+                />
+                <p className="mt-1 text-xs text-slate-500">
+                  When set, vacation and sick tiers count years of service from this date
+                  instead of hire date (e.g. returning employees).
+                </p>
               </div>
               <div className="sm:col-span-1">
                 <label className={labelCls} htmlFor="birth_date">
@@ -634,7 +716,7 @@ export function EmployeeProfileClient({
               <div className="sm:col-span-1">
                 <label className={labelCls} htmlFor="location_id">
                   <MapPin className="h-3.5 w-3.5" aria-hidden />
-                  Store
+                  Home store
                 </label>
                 <select
                   id="location_id"
@@ -643,6 +725,7 @@ export function EmployeeProfileClient({
                   onChange={(e) => {
                     const next = e.target.value;
                     setLocationId(next);
+                    setAdditionalLocationIds((prev) => prev.filter((id) => id !== next));
                     setDirectManagerId((prev) => {
                       const keep = storeManagers.some(
                         (m) => m.id === prev && m.location_id === next,
@@ -652,13 +735,59 @@ export function EmployeeProfileClient({
                   }}
                   disabled={!canEdit || pending}
                 >
-                  <option value="">Select store…</option>
+                  <option value="">Select home store…</option>
                   {locations.map((l) => (
                     <option key={l.id} value={l.id}>
                       {l.name}
                     </option>
                   ))}
                 </select>
+                <p className="mt-1 text-xs text-slate-500">
+                  Primary location for scheduling defaults and reporting.
+                </p>
+              </div>
+              <div className="sm:col-span-2">
+                <span className={labelCls}>
+                  <MapPin className="h-3.5 w-3.5" aria-hidden />
+                  Also works at
+                </span>
+                {!location_id ? (
+                  <p className="mt-2 text-xs text-slate-500">Choose a home store first.</p>
+                ) : additionalStoreOptions.length === 0 ? (
+                  <p className="mt-2 text-xs text-slate-500">No other stores available.</p>
+                ) : (
+                  <div
+                    className="mt-2 max-h-44 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50/50 p-3"
+                    role="group"
+                    aria-label="Additional store assignments"
+                  >
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      {additionalStoreOptions.map((l) => {
+                        const checked = additional_location_ids.includes(l.id);
+                        return (
+                          <label
+                            key={l.id}
+                            className={`flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm ${
+                              checked ? "bg-orange-50 text-orange-950" : "text-slate-700"
+                            } ${!canEdit || pending ? "cursor-default opacity-70" : "hover:bg-white"}`}
+                          >
+                            <input
+                              type="checkbox"
+                              className="rounded border-slate-300 text-orange-600 focus:ring-orange-500"
+                              checked={checked}
+                              disabled={!canEdit || pending}
+                              onChange={() => toggleAdditionalStore(l.id)}
+                            />
+                            <span className="truncate">{l.name}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                <p className="mt-1.5 text-xs text-slate-500">
+                  Select every other store this employee can clock in or be scheduled at.
+                </p>
               </div>
               <div className="sm:col-span-2">
                 <label className={labelCls} htmlFor="direct_manager_id">

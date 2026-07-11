@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { getPostSignOutRedirect, redirectAfterSignOut } from "@/lib/hub-app-url";
 
 export function SignOutButton() {
   const router = useRouter();
@@ -12,8 +13,13 @@ export function SignOutButton() {
     setLoading(true);
     const supabase = createSupabaseBrowserClient();
     await supabase.auth.signOut();
+    const target = getPostSignOutRedirect("/login");
+    if (target.startsWith("http://") || target.startsWith("https://")) {
+      redirectAfterSignOut("/login");
+      return;
+    }
     router.refresh();
-    router.push("/login");
+    router.push(target);
     setLoading(false);
   }
 

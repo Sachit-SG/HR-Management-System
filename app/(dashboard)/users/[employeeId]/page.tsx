@@ -27,6 +27,7 @@ const PROFILE_SELECT = [
   "direct_manager_id",
   "mobile_phone",
   "birth_date",
+  "gender",
   "employment_start_date",
   "fte",
   "standard_hours_per_week",
@@ -55,6 +56,7 @@ type ProfileRow = {
   direct_manager_id: string | null;
   mobile_phone: string | null;
   birth_date: string | null;
+  gender: string | null;
   title: string | null;
   employment_start_date: string | null;
   fte: number | null;
@@ -157,6 +159,15 @@ export default async function EmployeeProfilePage({
     groupNames = (gRows ?? []).map((g) => String((g as { name?: string }).name ?? "")).filter(Boolean);
   }
 
+  const { data: assignmentRows } = await supabase
+    .from("employee_location_assignments")
+    .select("location_id")
+    .eq("employee_id", id);
+
+  const additionalLocationIds = (assignmentRows ?? [])
+    .map((row) => String((row as { location_id?: string }).location_id ?? ""))
+    .filter((lid) => lid && lid !== locationId);
+
   const { data: mgrRows } = await supabase
     .from("employees")
     .select("id, full_name, first_name, last_name, location_id, role")
@@ -203,6 +214,7 @@ export default async function EmployeeProfilePage({
     location_id: locationId ?? "",
     direct_manager_id: rec.direct_manager_id ?? "",
     birth_date: rec.birth_date ? String(rec.birth_date) : "",
+    gender: rec.gender ?? "",
     employee_code: rec.employee_code ?? "",
     kiosk_code: rec.kiosk_code ?? "",
     status: employeeStatus,
@@ -290,6 +302,7 @@ export default async function EmployeeProfilePage({
   return (
     <EmployeeProfileClient
       initial={initial}
+      additionalLocationIds={additionalLocationIds}
       locations={(locRows ?? []).map((l) => ({ id: l.id, name: l.name }))}
       storeManagers={storeManagers}
       groupNames={groupNames}
